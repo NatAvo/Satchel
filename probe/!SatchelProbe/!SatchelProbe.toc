@@ -1,0 +1,8 @@
+## Interface: 16001
+## Title: Satchel Probe
+## Notes: Records which addons loaded, their Lua errors and blocked actions, so Satchel can tell whether candidates work on Forever. Hides Lua error popups and records them instead (/probe hide all|combat|off). /probe for a summary.
+## Author: Satchel
+## Version: 1.2.0
+## SavedVariables: SatchelProbeDB
+
+Probe.lua
