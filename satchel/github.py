@@ -132,6 +132,18 @@ class GitHub:
         if asset is None:
             names = ", ".join(item["name"] for item in assets) or "no files"
             raise SatchelError(f"{repo} {tag} has no Forever build. Release files: {names}")
+        return self._release(repo, tag, asset, private)
+
+    def latest_file(self, repo: str, name: str) -> Release:
+        """The file called `name` in the repository's latest release."""
+        data = self._api(f"/repos/{repo}/releases/latest")
+        tag = data["tag_name"]
+        for asset in data.get("assets", []):
+            if asset["name"].lower() == name.lower():
+                return self._release(repo, tag, asset, self._is_private(repo))
+        raise SatchelError(f"{repo} {tag} has no {name}.")
+
+    def _release(self, repo: str, tag: str, asset: dict, private: bool) -> Release:
         if private:
             return Release(SOURCE, repo, tag, asset["name"], asset["url"], asset.get("digest") or "",
                            token=self.token or "")

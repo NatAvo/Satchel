@@ -10,6 +10,8 @@ Use `dist\Satchel.exe`, or run it from source with Python 3.12 or later:
 python -m satchel
 ```
 
+When `Satchel.exe` starts, it checks the latest release of `NatAvo/Satchel` on GitHub. If that release is newer, Satchel asks whether to update. If you say yes, it downloads the new `Satchel.exe`, checks it against GitHub's checksum, swaps it in and restarts. If GitHub can't be reached, the check fails quietly and only the log mentions it. Run from source, Satchel only says in the status line that a newer release exists.
+
 Satchel has no third-party runtime dependencies. It looks for `World of Warcraft\_forever_` on each drive. If it can't find your install, use **Change folder…**.
 
 ## Add addons
@@ -38,6 +40,8 @@ Existing folders in `AddOns` appear as **Not managed**. Satchel doesn't change t
 **Check for updates** asks GitHub and WoWInterface for each managed addon's latest release, and **Update all** installs the ones it found.
 
 Tick **Auto-update** to have Satchel do both on its own: right away, and then every hour while its window is open. It installs updates the same way **Update all** does, so an addon that has stopped declaring Forever support is only updated if you already accepted it as Not declared. Results and any failures appear in the status line instead of a dialog. Satchel remembers the setting.
+
+While the game is running, Auto-update only checks: it lists what it found and installs it once you close the game, checking again every 5 minutes. The game reads `AddOns` only when it starts, so replacing an addon under it (even followed by `/reload`) leaves it running a mix of old and new files. **Update all** still works while the game runs if you choose to use it, but restart the game afterwards.
 
 ## Profiles
 
@@ -73,6 +77,7 @@ A package with several folders counts as supported if any one of them declares i
 - Satchel's list of installed addons is `_forever_\_satchel\manifest.json`.
 - Saved profiles are full copies of `AddOns` in `_forever_\_satchel\profiles`. Delete ones you no longer need from the Profiles window.
 - Settings are saved in `%LOCALAPPDATA%\Satchel\config.json`: a folder you choose by hand, and whether Auto-update is on. If it detects your folder automatically and you never tick Auto-update, Satchel doesn't save anything there.
+- `%LOCALAPPDATA%\Satchel\satchel.log` records what Satchel did and why: every install, update, uninstall, reinstall and removal, with the folders it moved and the backup they went to, what started it (a button, the right-click menu, Auto-update or a profile), and any failures. Entries older than a month are dropped when Satchel starts.
 - `WTF`, which holds your settings and SavedVariables, is never touched.
 
 If an install or update fails while changing files, Satchel restores the previous folders. ZIPs with unsafe paths or symbolic links are rejected, and so are ZIPs that try to replace Blizzard's addons.
@@ -90,6 +95,14 @@ python -m pytest
 python -m PyInstaller --noconsole --onefile --name Satchel --icon satchel\assets\satchel.ico --add-data "satchel\assets;satchel\assets" satchel\__main__.py
 ```
 
+To publish a new version, bump `__version__` in `satchel/__init__.py`, commit and push, then run:
+
+```
+python tools/release.py "What changed."
+```
+
+It runs the tests, builds `dist\Satchel.exe`, tags `v<version>` and creates the GitHub release that Satchel offers as an update.
+
 ## App icon
 
-`satchel\assets\satchel.ico` is original artwork.
+`satchel\assets\satchel.ico` is original artwork drawn by `tools/make_icon.py`. To change it, edit the drawing there and run the script again (it needs Pillow).

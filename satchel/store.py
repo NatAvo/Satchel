@@ -19,6 +19,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path, PurePosixPath
 
 from satchel import wow
+from satchel import log as activity
+from satchel.log import folders as _names, log
 
 MAX_ENTRIES = 100_000
 MAX_UNPACKED_BYTES = 2 * 1024**3
@@ -232,6 +234,11 @@ class Store:
             remaining = {key: value for key, value in entries.items() if value not in replaced}
             remaining[id] = entry
             self._swap(to_remove, staging, remaining, label=name)
+            previous = ", ".join(f"{old.name} {old.version}" + (" (uninstalled)" if old.uninstalled else "")
+                                 for old in replaced)
+            log.info("%s %s %s [%s] from %s: %s%s%s", "Updated" if replaced else "Installed", name, version, id,
+                     asset or source, _names(folders), f"; replaced {previous}" if previous else "",
+                     activity.auto_update_note())
             # A fresh install supersedes a kept uninstalled copy; it goes to backups.
             for old in replaced:
                 if old.uninstalled:
@@ -264,6 +271,7 @@ class Store:
                     moved_in.append(incoming.name)
             self._save(entries)
         except OSError as exc:
+            log.error("Changing %s failed, putting folders back: %s", label, exc)
             for folder in moved_in:
                 shutil.rmtree(self.addons_dir / folder, ignore_errors=True)
             for folder in moved_out:
@@ -274,6 +282,10 @@ class Store:
                 f"Could not change the addon files, so nothing was changed: {exc}. "
                 "If the game is running, close it and try again."
             ) from exc
+        if moved_out:
+            log.info("Moved %s out of AddOns to %s", _names(moved_out), backup)
+        if moved_in:
+            log.info("Put %s into AddOns", _names(moved_in))
         self._prune_backups()
 
     def _new_backup_path(self, label: str) -> Path:
@@ -285,6 +297,7 @@ class Store:
         backups = sorted(path for path in self.backups_dir.iterdir() if path.is_dir())
         for old in backups[:-BACKUPS_TO_KEEP]:
             shutil.rmtree(old, ignore_errors=True)
+            log.info("Deleted old backup %s", old.name)
 
     # Remove -------------------------------------------------------------------
 
@@ -296,10 +309,12 @@ class Store:
             self._discard_shelf(entry)
             entries.pop(entry.id, None)
             self._save(entries)
+            log.info("Removed %s [%s] from the list; its kept files went to backups", row.name, row.id)
             return
         if row.managed:
             entries.pop(row.id, None)
         self._swap(set(row.folders), None, entries, label=row.name)
+        log.info("Removed local files of %s [%s]: %s", row.name, row.id, _names(row.folders))
 
     def forget(self, row: Row) -> None:
         """Stops managing the addon. Its folders stay in AddOns and show as not managed."""
@@ -310,6 +325,7 @@ class Store:
         entries = self.entries()
         entries.pop(row.id, None)
         self._save(entries)
+        log.info("Removed %s [%s] from the list; its files stay in AddOns", row.name, row.id)
 
     # Uninstall ----------------------------------------------------------------
 
@@ -356,6 +372,7 @@ class Store:
         except OSError as exc:
             self._move_all(present, shelf, self.addons_dir)
             raise SatchelError(f"Could not update Satchel's list, so nothing was changed: {exc}") from exc
+        log.info("Uninstalled %s [%s]: moved %s to %s", entry.name, entry.id, _names(present), shelf)
         return entry
 
     def reinstall(self, row: Row) -> None:
@@ -383,6 +400,7 @@ class Store:
         except OSError as exc:
             self._move_all(kept, self.addons_dir, shelf)
             raise SatchelError(f"Could not update Satchel's list, so nothing was changed: {exc}") from exc
+        log.info("Reinstalled %s [%s]: moved %s back from %s", entry.name, entry.id, _names(kept), shelf)
         if not any(shelf.iterdir()):
             shelf.rmdir()
 
@@ -391,7 +409,9 @@ class Store:
         shelf = self.shelf(entry.id)
         if shelf.exists():
             self.backups_dir.mkdir(parents=True, exist_ok=True)
-            os.replace(shelf, self._new_backup_path(f"uninstalled-{entry.name}"))
+            backup = self._new_backup_path(f"uninstalled-{entry.name}")
+            os.replace(shelf, backup)
+            log.info("Moved the kept uninstalled copy of %s [%s] to %s", entry.name, entry.id, backup)
             self._prune_backups()
 
     # List ---------------------------------------------------------------------

@@ -13,13 +13,15 @@ import webbrowser
 from pathlib import Path
 from tkinter import filedialog, font, messagebox, simpledialog, ttk
 
-from satchel import discover, wow
+from satchel import __version__, discover, log as activity, selfupdate, wow
 from satchel.catalog import CatalogItem, by_category, verified_ids
 from satchel.download import Release, entry_id, install_release, page_url
 from satchel.github import GitHub, parse_repo
 from satchel.profiles import Profile, Profiles
 from satchel.store import NotMarkedForForever, Row, SatchelError, Store, import_local_zip
 from satchel.wowinterface import WoWInterface, parse_id
+
+log = activity.log
 
 CONFIG_PATH = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "Satchel" / "config.json"
 ICON_PATH = Path(__file__).parent / "assets" / "satchel.ico"
@@ -40,6 +42,11 @@ UPDATABLE_SOURCES = ("github", "wowinterface")
 AUTO_UPDATE_EVERY_MS = 60 * 60 * 1000
 AUTO_UPDATE_RETRY_MS = 60 * 1000  # When another task is running, try again shortly.
 AUTO_UPDATE_START_MS = 3 * 1000  # First check after opening, once the window has settled.
+# Updates found while the game runs wait for it to close: the client only reads AddOns at
+# launch, so swapping folders under it leaves it running a mix of old and new files.
+AUTO_UPDATE_GAME_RETRY_MS = 5 * 60 * 1000
+SELF_UPDATE_START_MS = 1000  # Checked once per launch.
+SELF_UPDATE_BUSY_RETRY_MS = 5 * 1000
 
 
 def status_text(row: Row, updates: dict, update_errors: dict) -> str:
@@ -130,6 +137,7 @@ class App(ttk.Frame):
         self.results: queue.Queue = queue.Queue()
         self.busy = False
         self.auto_update = tk.BooleanVar(value=load_config().get("auto_update") is True)
+        activity.auto_update = self.auto_update.get()
         self._auto_job: str | None = None
 
         root.title("Satchel")
@@ -141,6 +149,7 @@ class App(ttk.Frame):
         self._open_install(forever_dir)
         if self.auto_update.get():
             self._schedule_auto_update(AUTO_UPDATE_START_MS)
+        self.root.after(SELF_UPDATE_START_MS, self._check_self_update)
 
     def _build(self) -> None:
         header = ttk.Frame(self)
@@ -243,6 +252,7 @@ class App(ttk.Frame):
         )
         if remember:
             save_path(path)
+        log.info("Using %s (client %s, interface %s)", install.path, install.version, install.interface)
         self.refresh()
 
     def choose_folder(self) -> None:
@@ -361,6 +371,7 @@ class App(ttk.Frame):
     # Background work ----------------------------------------------------------
 
     def _run(self, label: str, work, done) -> None:
+        log.info("%s", label.rstrip("…"))
         self.busy = True
         self.status_label.configure(text=label)
         self._sync_buttons()
@@ -369,6 +380,10 @@ class App(ttk.Frame):
             try:
                 self.results.put((done, work(), None))
             except Exception as exc:  # Reported to the user on the UI thread.
+                if isinstance(exc, SatchelError):
+                    log.warning("%s failed: %s", label.rstrip("…"), exc)
+                else:
+                    log.exception("%s failed", label.rstrip("…"))
                 self.results.put((done, None, exc))
 
         threading.Thread(target=target, daemon=True).start()
@@ -834,10 +849,12 @@ class App(ttk.Frame):
 
     def _toggle_auto_update(self) -> None:
         enabled = self.auto_update.get()
+        activity.auto_update = enabled
         try:
             save_config(auto_update=enabled)
         except OSError as exc:
             messagebox.showerror("Satchel", f"Couldn't save the auto-update setting: {exc}")
+        log.info("Auto-update turned %s", "on" if enabled else "off")
         if enabled:
             self._schedule_auto_update(0)
         else:
@@ -868,20 +885,35 @@ class App(ttk.Frame):
 
         def work():
             updates, errors = find_updates(store, clients)
+            if updates and wow.is_game_running():
+                return updates, errors, None, {}  # None: installing waits for the game to close
             finished, failures = apply_updates(store, updates)
             return updates, errors, finished, failures
 
         def done(result, error):
             # Unattended, so problems go in the status line rather than a dialog.
-            if self.auto_update.get():
-                self._schedule_auto_update(AUTO_UPDATE_EVERY_MS)
             stamp = time.strftime("%H:%M")
-            next_check = time.strftime("%H:%M", time.localtime(time.time() + AUTO_UPDATE_EVERY_MS / 1000))
             if error:
+                self._schedule_auto_update(AUTO_UPDATE_EVERY_MS)
+                next_check = time.strftime("%H:%M", time.localtime(time.time() + AUTO_UPDATE_EVERY_MS / 1000))
                 text = str(error) if isinstance(error, SatchelError) else f"Unexpected error: {error}"
                 self.refresh(f"Auto-update at {stamp} failed: {text} Next try at {next_check}.")
                 return
             updates, errors, finished, failures = result
+            for addon_id, release in updates.items():
+                log.info("Auto-update found %s %s", addon_id, release.tag)
+            for addon_id, problem in {**errors, **failures}.items():
+                log.warning("Auto-update: %s: %s", addon_id, problem)
+            if finished is None:
+                log.info("Auto-update: the game is running, so installing waits until it closes")
+                self._schedule_auto_update(AUTO_UPDATE_GAME_RETRY_MS)
+                self.updates, self.update_errors = updates, errors
+                n = len(updates)
+                self.refresh(f"Auto-update at {stamp}: {n} update{'' if n == 1 else 's'} found. Satchel will "
+                             f"install {'it' if n == 1 else 'them'} once the game is closed.")
+                return
+            self._schedule_auto_update(AUTO_UPDATE_EVERY_MS)
+            next_check = time.strftime("%H:%M", time.localtime(time.time() + AUTO_UPDATE_EVERY_MS / 1000))
             self.updates = {addon_id: release for addon_id, release in updates.items() if addon_id not in finished}
             self.update_errors = errors
             if finished:
@@ -896,6 +928,59 @@ class App(ttk.Frame):
             self.refresh(f"{message} Next check at {next_check}.")
 
         self._run("Auto-update: checking for updates…", work, done)
+
+    # Satchel's own updates -------------------------------------------------------
+
+    def _say(self, message: str | None = None) -> None:
+        if self.store is not None:
+            self.refresh(message)
+        else:
+            self.status_label.configure(text=message or "Choose your _forever_ folder to get started.")
+
+    def _check_self_update(self) -> None:
+        """Once per launch: offers the latest Satchel release if it's newer than this one."""
+        if self.busy:
+            self.root.after(SELF_UPDATE_BUSY_RETRY_MS, self._check_self_update)
+            return
+        github = self.clients["github"]
+
+        def done(release, error):
+            if error or release is None:
+                self._say()  # a failed check is only logged; it shouldn't interrupt
+                return
+            log.info("Satchel %s is available (running %s)", release.tag, __version__)
+            exe = selfupdate.running_exe()
+            if exe is None:
+                self._say(f"Satchel {release.tag} is available; you have {__version__}. "
+                          "You're running from source, so pull the latest code to update.")
+                return
+            if not messagebox.askyesno(
+                "Satchel",
+                f"Satchel {release.tag} is available; you have {__version__}.\n\nUpdate now? Satchel will restart.",
+            ):
+                log.info("Satchel update to %s declined", release.tag)
+                self._say(f"Satchel {release.tag} is available. It will be offered again next time Satchel starts.")
+                return
+            self._install_self_update(release, exe)
+
+        self._run("Checking for a new version of Satchel…", lambda: selfupdate.check(github), done)
+
+    def _install_self_update(self, release: Release, exe: Path) -> None:
+        def done(_value, error):
+            if error:
+                self._show_error(error)
+                return
+            try:
+                selfupdate.restart(exe)
+            except OSError as exc:
+                log.error("Could not start the updated Satchel: %s", exc)
+                messagebox.showerror("Satchel", f"Satchel was updated, but couldn't restart: {exc}\n\n"
+                                                "Close it and start it again.")
+                return
+            self._cancel_auto_update()
+            self.root.destroy()
+
+        self._run(f"Updating Satchel to {release.tag}…", lambda: selfupdate.install(release, exe), done)
 
     def uninstall_selected(self) -> None:
         rows = [row for row in self._selected_rows() if _installed(row)]
@@ -917,6 +1002,7 @@ class App(ttk.Frame):
                 try:
                     action(row)
                 except (SatchelError, OSError) as exc:
+                    log.warning("%s %s [%s] failed: %s", verb, row.name, row.id, exc)
                     failures.append(str(exc))
             return failures
 
@@ -933,6 +1019,7 @@ class App(ttk.Frame):
                 message += " Failed: " + " ".join(failures)
             self.refresh(self._finished_message(message))
 
+        log.info("%s chosen from the right-click menu for: %s", verb, ", ".join(row.name for row in rows))
         self._run(f"{verb} {len(rows)} addon{'' if len(rows) == 1 else 's'}…", work, done)
 
     def forget_selected(self) -> None:
@@ -953,6 +1040,7 @@ class App(ttk.Frame):
                 self.updates.pop(row.id, None)
                 self.update_errors.pop(row.id, None)
         except (SatchelError, OSError) as exc:
+            log.warning("Remove from List failed: %s", exc)
             self._show_error(exc)
             return
         self.refresh(f"Removed {len(rows)} addon{'' if len(rows) == 1 else 's'} from the list; the files are still in AddOns.")
@@ -1007,10 +1095,19 @@ def apply_icon(root: tk.Tk) -> None:
 def main(forever_dir: Path | None = None) -> None:
     # Without its own ID, Windows groups the app under Python's taskbar icon when run from source.
     ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("Satchel.AddonManager")
+    activity.setup()
+    selfupdate.clean_up()
+    log.info("Satchel %s started%s", __version__, " (the game is running)" if wow.is_game_running() else "")
     root = tk.Tk()
     apply_icon(root)
-    root.report_callback_exception = lambda _type, value, _trace: messagebox.showerror(
-        "Satchel", f"Unexpected error: {value}"
-    )
-    App(root, forever_dir)
-    root.mainloop()
+
+    def report(kind, value, trace):
+        log.error("Unexpected error", exc_info=(kind, value, trace))
+        messagebox.showerror("Satchel", f"Unexpected error: {value}")
+
+    root.report_callback_exception = report
+    try:
+        App(root, forever_dir)
+        root.mainloop()
+    finally:
+        log.info("Satchel closed")

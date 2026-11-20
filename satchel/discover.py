@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 
 from satchel import wow
 from satchel.download import Release, entry_id
+from satchel.log import folders as _names, log
 from satchel.store import Entry, SatchelError, Store
 
 
@@ -112,4 +113,5 @@ def adopt(store: Store, discovery: Discovery) -> Entry:
     )
     entries[entry.id] = entry
     store._save(entries)
+    log.info("Started managing %s [%s] as %s: %s", entry.name, entry.id, version, _names(entry.folders))
     return entry

@@ -19,6 +19,7 @@ from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
 from satchel import wow
+from satchel.log import folders as _names, log
 from satchel.store import Entry, SatchelError, Store, _slug
 
 PROFILE_FILE = "profile.json"
@@ -130,12 +131,14 @@ class Profiles:
                 shutil.rmtree(old, ignore_errors=True)
         finally:
             shutil.rmtree(staging, ignore_errors=True)
+        log.info('Saved profile "%s" with %s', name, _names(folders))
         return self._read(target)
 
     def delete(self, profile: Profile) -> None:
         if profile.path.parent != self.dir:
             raise SatchelError("That profile isn't in Satchel's profile folder.")
         shutil.rmtree(profile.path)
+        log.info('Deleted profile "%s"', profile.name)
 
     # Restoring ----------------------------------------------------------------
 
@@ -181,7 +184,10 @@ class Profiles:
         (kept, and still listed), so switching back and forth loses nothing."""
         plan = self.plan(profile)
         if not plan.changes:
+            log.info('Restoring profile "%s": nothing to change', profile.name)
             return plan
+        log.info('Restoring profile "%s": uninstalling %s; replacing %s; adding %s', profile.name,
+                 _names(plan.uninstall), _names(plan.remove), _names(plan.add))
         store = self.store
         before = store.entries()
         shelved = self._shelved_entries(plan)
