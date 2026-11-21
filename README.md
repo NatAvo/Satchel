@@ -80,6 +80,8 @@ A package with several folders counts as supported if any one of them declares i
 - `%LOCALAPPDATA%\Satchel\satchel.log` records what Satchel did and why: every install, update, uninstall, reinstall and removal, with the folders it moved and the backup they went to, what started it (a button, the right-click menu, Auto-update or a profile), and any failures. Entries older than a month are dropped when Satchel starts.
 - `WTF`, which holds your settings and SavedVariables, is never touched.
 
+Folders Satchel puts in `AddOns` get the same Windows permissions as the rest of the folder. When it opens, Satchel also repairs any folder in `AddOns` the game can't read, since the game leaves those addons out of its list without an error.
+
 If an install or update fails while changing files, Satchel restores the previous folders. ZIPs with unsafe paths or symbolic links are rejected, and so are ZIPs that try to replace Blizzard's addons.
 
 ## Limits

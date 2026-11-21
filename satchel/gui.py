@@ -254,6 +254,24 @@ class App(ttk.Frame):
             save_path(path)
         log.info("Using %s (client %s, interface %s)", install.path, install.version, install.interface)
         self.refresh()
+        self._repair_permissions()
+
+    def _repair_permissions(self) -> None:
+        """Folders the game can't read are left out of its addon list without a word, so
+        fix any (older Satchel versions made them) as soon as the folder is opened."""
+        store = self.store
+
+        def done(fixed, error):
+            if error or not fixed:
+                self.refresh()
+                return
+            message = (f"Fixed the permissions on {', '.join(fixed)}, which the game couldn't read, "
+                       "so it left them out of its addon list.")
+            if wow.is_game_running():
+                message += " Restart the game to load them."
+            self.refresh(message)
+
+        self._run("Checking addon folders…", store.repair_permissions, done)
 
     def choose_folder(self) -> None:
         chosen = filedialog.askdirectory(title="Choose your _forever_ folder")

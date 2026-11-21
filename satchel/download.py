@@ -4,14 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import shutil
-import tempfile
 import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import quote, urlparse
 
 from satchel import __version__
-from satchel.store import Entry, SatchelError, Store, inspect_zip
+from satchel.store import Entry, SatchelError, Store, inspect_zip, make_work_dir
 
 USER_AGENT = f"Satchel/{__version__}"
 TIMEOUT = 60
@@ -83,7 +82,7 @@ def download_release(release: Release, destination: Path) -> None:
 
 
 def install_release(store: Store, release: Release, allow_unverified: bool = False) -> Entry:
-    workspace = Path(tempfile.mkdtemp(prefix="download-", dir=store.work_dir))
+    workspace = make_work_dir(store.work_dir, "download-")
     try:
         zip_path = workspace / "package.zip"
         download_release(release, zip_path)

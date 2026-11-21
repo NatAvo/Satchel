@@ -11,7 +11,8 @@ import os
 import re
 import shutil
 import stat
-import tempfile
+import subprocess
+import sys
 import time
 import uuid
 import zipfile
@@ -143,6 +144,77 @@ def _extract(zip_path: Path, destination: Path, folders: set[str]) -> None:
                     output.write(chunk)
 
 
+def make_work_dir(parent: Path, prefix: str) -> Path:
+    """A new, empty folder for unpacking or copying addons.
+
+    tempfile.mkdtemp isn't used: since Python 3.12.4 it gives the folder an ACL that only
+    SYSTEM, Administrators and the owner can read, and folders moved out of it keep that
+    ACL. The game can't read such a folder in AddOns, so it leaves the addon out of its
+    list. A plain mkdir inherits the permissions of _satchel, like AddOns itself.
+    """
+    parent.mkdir(parents=True, exist_ok=True)
+    while True:
+        path = parent / f"{prefix}{uuid.uuid4().hex[:10]}"
+        try:
+            path.mkdir()
+            return path
+        except FileExistsError:
+            continue
+
+
+def _icacls(*args: str) -> subprocess.CompletedProcess | None:
+    if sys.platform != "win32":
+        return None
+    try:
+        return subprocess.run(["icacls", *args], capture_output=True, text=True, timeout=120,
+                              creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def inherit_permissions(paths: list[Path]) -> None:
+    """Resets the folders (and everything in them) to the permissions they inherit, so
+    the game can read them wherever they came from."""
+    for path in paths:
+        result = _icacls(str(path), "/reset", "/T", "/C", "/Q")
+        if result is not None and result.returncode != 0:
+            log.warning("Couldn't reset permissions on %s: %s", path, (result.stderr or result.stdout).strip())
+
+
+_ACE = re.compile(r"^\s*(.+?):((?:\([^)]*\))+)\s*$")
+
+
+def _aces(path: Path) -> list[tuple[str, str]] | None:
+    """(identity, flags) for each entry in the folder's ACL, or None if it can't be read."""
+    result = _icacls(str(path))
+    if result is None or result.returncode != 0:
+        return None
+    aces = []
+    for number, line in enumerate(result.stdout.splitlines()):
+        if number == 0:
+            line = line[len(str(path)):] if line.startswith(str(path)) else line
+        match = _ACE.match(line)
+        if match:
+            aces.append((match.group(1).strip(), match.group(2)))
+    return aces
+
+
+def locked_folders(directory: Path) -> list[Path]:
+    """Folders in `directory` missing someone `directory` passes access down to, such as
+    Users, so the game may not be able to read them (Windows only)."""
+    parent = _aces(directory)
+    if not parent:
+        return []
+    handed_down = {who for who, flags in parent if "(OI)" in flags or "(CI)" in flags}
+    locked = []
+    for path in sorted(directory.iterdir()):
+        if path.is_dir():
+            aces = _aces(path)
+            if aces is not None and handed_down - {who for who, _flags in aces}:
+                locked.append(path)
+    return locked
+
+
 def _slug(text: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]+", "-", text).strip("-.")[:60] or "addon"
 
@@ -213,7 +285,7 @@ class Store:
             replaced.append(same)
 
         to_remove = {folder for entry in replaced for folder in entry.folders} | set(folders)
-        staging = Path(tempfile.mkdtemp(prefix="staging-", dir=self.work_dir))
+        staging = make_work_dir(self.work_dir, "staging-")
         try:
             try:
                 _extract(zip_path, staging, set(folders))
@@ -269,6 +341,7 @@ class Store:
                 for incoming in sorted(staging.iterdir()):
                     os.replace(incoming, self.addons_dir / incoming.name)
                     moved_in.append(incoming.name)
+                inherit_permissions([self.addons_dir / folder for folder in moved_in])
             self._save(entries)
         except OSError as exc:
             log.error("Changing %s failed, putting folders back: %s", label, exc)
@@ -298,6 +371,15 @@ class Store:
         for old in backups[:-BACKUPS_TO_KEEP]:
             shutil.rmtree(old, ignore_errors=True)
             log.info("Deleted old backup %s", old.name)
+
+    def repair_permissions(self) -> list[str]:
+        """Gives folders in AddOns that the game can't read their normal permissions back.
+        Returns their names."""
+        locked = locked_folders(self.addons_dir)
+        if locked:
+            inherit_permissions(locked)
+            log.info("Reset permissions on %s so the game can read them", _names(path.name for path in locked))
+        return [path.name for path in locked]
 
     # Remove -------------------------------------------------------------------
 
@@ -391,6 +473,7 @@ class Store:
                 f"AddOns already has {', '.join(clash)}, so {row.name} can't go back. Remove that addon first."
             )
         self._move_all(kept, shelf, self.addons_dir)
+        inherit_permissions([self.addons_dir / folder for folder in kept])
         if entry.source == "manual":
             entries.pop(entry.id)  # It was never managed; it goes back to Not managed.
         else:
