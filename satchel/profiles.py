@@ -13,14 +13,13 @@ from __future__ import annotations
 import json
 import os
 import shutil
-import tempfile
 import time
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
 from satchel import wow
 from satchel.log import folders as _names, log
-from satchel.store import Entry, SatchelError, Store, _slug
+from satchel.store import Entry, SatchelError, Store, _slug, make_work_dir
 
 PROFILE_FILE = "profile.json"
 MAX_NAME = 60
@@ -108,7 +107,7 @@ class Profiles:
         folders = self._on_disk()
         entries = list(self.store.entries().values())
         self.dir.mkdir(parents=True, exist_ok=True)
-        staging = Path(tempfile.mkdtemp(prefix="saving-", dir=self.dir))
+        staging = make_work_dir(self.dir, "saving-")
         try:
             try:
                 for folder in folders:
@@ -207,7 +206,7 @@ class Profiles:
                       if entry.uninstalled and entry.id in entries and not entries[entry.id].uninstalled]
 
         source = profile.path / "addons"
-        staging = Path(tempfile.mkdtemp(prefix="staging-", dir=store.work_dir))
+        staging = make_work_dir(store.work_dir, "staging-")
         moved: list[tuple[list[str], Path]] = []
         try:
             try:
