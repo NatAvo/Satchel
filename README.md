@@ -41,7 +41,7 @@ Existing folders in `AddOns` appear as **Not managed**. Satchel doesn't change t
 
 Tick **Auto-update** to have Satchel do both on its own: right away, and then every hour while its window is open. It installs updates the same way **Update all** does, so an addon that has stopped declaring Forever support is only updated if you already accepted it as Not declared. Results and any failures appear in the status line instead of a dialog. Satchel remembers the setting.
 
-While the game is running, Auto-update only checks: it lists what it found and installs it once you close the game, checking again every 5 minutes. The game reads `AddOns` only when it starts, so replacing an addon under it (even followed by `/reload`) leaves it running a mix of old and new files. **Update all** still works while the game runs if you choose to use it, but restart the game afterwards.
+While the game is running, Auto-update only checks: it lists what it found, then looks every 30 seconds for whether the game is still running and installs the updates once you close it. Looking for the game doesn't contact GitHub or WoWInterface. The game reads `AddOns` only when it starts, so replacing an addon under it (even followed by `/reload`) leaves it running a mix of old and new files. **Update all** still works while the game runs if you choose to use it, but restart the game afterwards.
 
 ## Profiles
 

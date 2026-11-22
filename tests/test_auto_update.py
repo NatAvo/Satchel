@@ -98,3 +98,61 @@ def test_apply_updates_only_allows_already_accepted_unmarked_addons(monkeypatch)
     assert finished == ["github:a/ok", "github:a/unmarked"]
     assert failures == {"github:a/fails": "bad zip"}
     assert ("a/ok", False) in calls and ("a/unmarked", True) in calls
+
+
+def test_still_pending_drops_updates_that_no_longer_apply():
+    store = FakeStore([
+        entry("github:a/waiting", repo="a/waiting", version="v1"),
+        entry("github:a/done", repo="a/done", version="v2"),  # Update all already installed it
+        entry("github:a/gone", repo="a/gone", uninstalled=True),
+    ])
+    found = {
+        "github:a/waiting": release("a/waiting", "v2"),
+        "github:a/done": release("a/done", "v2"),
+        "github:a/gone": release("a/gone", "v2"),
+        "github:a/removed": release("a/removed", "v2"),  # no longer managed
+    }
+    assert set(gui.still_pending(store, found)) == {"github:a/waiting"}
+
+
+class FakeRoot:
+    """Runs `after` callbacks only when the test says so, recording each delay."""
+
+    def __init__(self):
+        self.jobs = []
+
+    def after(self, delay, callback):
+        self.jobs.append((delay, callback))
+        return str(len(self.jobs))
+
+    def after_cancel(self, job):
+        pass
+
+    def run_next(self):
+        delay, callback = self.jobs.pop(0)
+        callback()
+        return delay
+
+
+def test_waiting_updates_install_soon_after_the_game_closes(monkeypatch):
+    running = [True]
+    monkeypatch.setattr(wow, "is_game_running", lambda: running[0])
+    app = SimpleNamespace(root=FakeRoot(), _auto_job=None, auto_update=SimpleNamespace(get=lambda: True))
+    installs = []
+    app._cancel_auto_update = lambda: None
+    app._schedule_auto_update = lambda delay, waiting=False: gui.App._schedule_auto_update(app, delay, waiting)
+    app._wait_for_game = lambda: gui.App._wait_for_game(app)
+    app._auto_update = lambda waiting=False: installs.append(waiting)
+
+    app._schedule_auto_update(gui.AUTO_UPDATE_GAME_POLL_MS, waiting=True)
+    for _ in range(3):  # game still running: look again in 30 seconds
+        assert app.root.run_next() == gui.AUTO_UPDATE_GAME_POLL_MS
+        while app.root.jobs and app.root.jobs[0][0] == 100:  # waiting on the background look
+            app.root.run_next()
+    assert installs == []
+    running[0] = False
+    assert app.root.run_next() == gui.AUTO_UPDATE_GAME_POLL_MS
+    while not installs:
+        app.root.run_next()
+    assert installs == [True]
+    assert gui.AUTO_UPDATE_GAME_POLL_MS == 30 * 1000
