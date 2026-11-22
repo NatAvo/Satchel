@@ -44,7 +44,9 @@ AUTO_UPDATE_RETRY_MS = 60 * 1000  # When another task is running, try again shor
 AUTO_UPDATE_START_MS = 3 * 1000  # First check after opening, once the window has settled.
 # Updates found while the game runs wait for it to close: the client only reads AddOns at
 # launch, so swapping folders under it leaves it running a mix of old and new files.
-AUTO_UPDATE_GAME_RETRY_MS = 5 * 60 * 1000
+# While updates wait, Satchel looks for the game every 30 seconds. That only lists local
+# processes, so it costs no web requests, and updates go in soon after the game closes.
+AUTO_UPDATE_GAME_POLL_MS = 30 * 1000
 SELF_UPDATE_START_MS = 1000  # Checked once per launch.
 SELF_UPDATE_BUSY_RETRY_MS = 5 * 1000
 
@@ -109,6 +111,16 @@ def find_updates(store: Store, clients: dict) -> tuple[dict[str, Release], dict[
         if release.tag != entry.version:
             updates[entry.id] = release
     return updates, errors
+
+
+def still_pending(store: Store, updates: dict[str, Release]) -> dict[str, Release]:
+    """The found updates that still apply: the addon is still managed, installed, and not
+    already at that release (for example after Update all, a removal or an uninstall)."""
+    entries = store.entries()
+    return {
+        addon_id: release for addon_id, release in updates.items()
+        if (entry := entries.get(addon_id)) is not None and not entry.uninstalled and entry.version != release.tag
+    }
 
 
 def apply_updates(store: Store, pending: dict[str, Release]) -> tuple[list[str], dict[str, str]]:
@@ -884,12 +896,38 @@ class App(ttk.Frame):
             self.root.after_cancel(self._auto_job)
             self._auto_job = None
 
-    def _schedule_auto_update(self, delay_ms: int) -> None:
+    def _schedule_auto_update(self, delay_ms: int, waiting: bool = False) -> None:
         self._cancel_auto_update()
-        self._auto_job = self.root.after(delay_ms, self._auto_update)
+        self._auto_job = self.root.after(delay_ms, self._wait_for_game if waiting else self._auto_update)
 
-    def _auto_update(self) -> None:
-        """Checks for updates and installs them, then schedules the next check in an hour."""
+    def _wait_for_game(self) -> None:
+        """Updates found while the game ran are waiting: looks for the game in the background
+        and installs them as soon as it has closed."""
+        self._auto_job = None
+        if not self.auto_update.get():
+            return
+        found: list[bool] = []
+        checker = threading.Thread(target=lambda: found.append(wow.is_game_running()), daemon=True)
+        checker.start()
+
+        def result() -> None:
+            self._auto_job = None
+            if checker.is_alive():
+                self._auto_job = self.root.after(100, result)
+            elif not self.auto_update.get():
+                return
+            elif found and found[0]:
+                self._schedule_auto_update(AUTO_UPDATE_GAME_POLL_MS, waiting=True)
+            else:
+                log.info("Auto-update: the game has closed")
+                self._auto_update(waiting=True)
+
+        result()
+
+    def _auto_update(self, waiting: bool = False) -> None:
+        """Checks for updates and installs them, then schedules the next check in an hour.
+        `waiting`: install the updates found earlier, which waited for the game to close,
+        without asking GitHub and WoWInterface again."""
         self._auto_job = None
         if not self.auto_update.get():
             return
@@ -897,12 +935,19 @@ class App(ttk.Frame):
             self._schedule_auto_update(AUTO_UPDATE_EVERY_MS)
             return
         if self.busy:
-            self._schedule_auto_update(AUTO_UPDATE_RETRY_MS)
+            if waiting:
+                self._schedule_auto_update(AUTO_UPDATE_GAME_POLL_MS, waiting=True)
+            else:
+                self._schedule_auto_update(AUTO_UPDATE_RETRY_MS)
             return
         store, clients = self.store, self.clients
+        found, found_errors = dict(self.updates), dict(self.update_errors)
 
         def work():
-            updates, errors = find_updates(store, clients)
+            if waiting:
+                updates, errors = still_pending(store, found), found_errors
+            else:
+                updates, errors = find_updates(store, clients)
             if updates and wow.is_game_running():
                 return updates, errors, None, {}  # None: installing waits for the game to close
             finished, failures = apply_updates(store, updates)
@@ -918,14 +963,17 @@ class App(ttk.Frame):
                 self.refresh(f"Auto-update at {stamp} failed: {text} Next try at {next_check}.")
                 return
             updates, errors, finished, failures = result
-            for addon_id, release in updates.items():
-                log.info("Auto-update found %s %s", addon_id, release.tag)
+            if not waiting:
+                for addon_id, release in updates.items():
+                    log.info("Auto-update found %s %s", addon_id, release.tag)
             for addon_id, problem in {**errors, **failures}.items():
                 log.warning("Auto-update: %s: %s", addon_id, problem)
             if finished is None:
-                log.info("Auto-update: the game is running, so installing waits until it closes")
-                self._schedule_auto_update(AUTO_UPDATE_GAME_RETRY_MS)
+                self._schedule_auto_update(AUTO_UPDATE_GAME_POLL_MS, waiting=True)
                 self.updates, self.update_errors = updates, errors
+                if waiting:  # The game started again before installing began; keep waiting.
+                    return
+                log.info("Auto-update: the game is running, so installing waits until it closes")
                 n = len(updates)
                 self.refresh(f"Auto-update at {stamp}: {n} update{'' if n == 1 else 's'} found. Satchel will "
                              f"install {'it' if n == 1 else 'them'} once the game is closed.")
@@ -945,7 +993,8 @@ class App(ttk.Frame):
                 message += " Some checks failed: " + "; ".join(errors.values())
             self.refresh(f"{message} Next check at {next_check}.")
 
-        self._run("Auto-update: checking for updates…", work, done)
+        label = "Auto-update: the game has closed, installing updates…" if waiting else "Auto-update: checking for updates…"
+        self._run(label, work, done)
 
     # Satchel's own updates -------------------------------------------------------
 
